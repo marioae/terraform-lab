@@ -119,16 +119,21 @@ jobs:
           terraform plan -no-color -var-file="envs/$TARGET_ENV.tfvars" -out=tfplan | tee plan_output.txt
           terraform show -no-color tfplan >> plan_output.txt
 
+      - name: Verificar que el zip de la Lambda se generó
+        run: ls -la modules/lambda/build/
+
       - name: Upload plan artifact
-        # Incluye también el .zip que genera data.archive_file (modules/lambda/.build/):
+        # Incluye también el .zip que genera data.archive_file (modules/lambda/build/):
         # es un efecto local en disco durante el plan, no viaja dentro de tfplan, y el
         # job de apply corre en un runner nuevo que no lo tiene — hay que llevarlo a mano.
+        # (Antes era ".build/" con punto — algunos globbers excluyen ocultos por defecto,
+        # por eso el zip nunca llegaba al artefacto pese a existir en el runner del plan.)
         uses: actions/upload-artifact@v4
         with:
           name: tfplan
           path: |
             ${{ env.TF_WORKING_DIR }}/tfplan
-            modules/lambda/.build/
+            modules/lambda/build/
           retention-days: 5
 
       - name: Comment plan on PR
@@ -185,6 +190,9 @@ jobs:
         with:
           name: tfplan
           path: .
+
+      - name: Verificar que el zip llegó al runner de apply
+        run: ls -la modules/lambda/build/ ${{ env.TF_WORKING_DIR }}/tfplan
 
       - name: terraform apply
         working-directory: ${{ env.TF_WORKING_DIR }}

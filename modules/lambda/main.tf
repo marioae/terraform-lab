@@ -1,7 +1,7 @@
 data "archive_file" "this" {
   type        = "zip"
   source_dir  = var.source_dir
-  output_path = "${path.module}/.build/${var.function_name}.zip"
+  output_path = "${path.module}/build/${var.function_name}.zip"
 }
 
 resource "aws_iam_role" "lambda_exec" {

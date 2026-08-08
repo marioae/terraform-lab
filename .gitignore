@@ -17,4 +17,6 @@ override.tf.json
 !infra/envs/*.tfvars
 
 # Artefactos de build (zips generados por el módulo lambda)
-**/.build/
+# Sin punto al inicio a propósito: algunos globbers (incluido el que usa
+# actions/upload-artifact en CI) excluyen por defecto directorios ocultos.
+**/build/
