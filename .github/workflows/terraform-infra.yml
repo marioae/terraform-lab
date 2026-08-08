@@ -1,13 +1,21 @@
 name: Terraform Infra
 
+# El ambiente a desplegar depende de la rama, no de una matrix:
+#   PR/push -> dev  => ambiente dev
+#   PR/push -> uat  => ambiente uat
+#   PR/push -> main => ambiente prod
+# Flujo de promoción: feature branch -> PR a dev -> PR de dev a uat -> PR de uat a main.
+
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches: [dev, uat, main]
     paths:
       - "infra/**"
       - "modules/**"
       - ".github/workflows/terraform-infra.yml"
   push:
-    branches: [main]
+    branches: [dev, uat, main]
     paths:
       - "infra/**"
       - "modules/**"
@@ -25,6 +33,31 @@ env:
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
 jobs:
+  resolve:
+    name: Resolver ambiente según la rama
+    runs-on: ubuntu-latest
+    outputs:
+      env_name: ${{ steps.set.outputs.env_name }}
+    steps:
+      - id: set
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BRANCH="${{ github.base_ref }}"
+          else
+            BRANCH="${{ github.ref_name }}"
+          fi
+          case "$BRANCH" in
+            dev) ENV=dev ;;
+            uat) ENV=uat ;;
+            main) ENV=prod ;;
+            *)
+              echo "Rama '$BRANCH' no está mapeada a ningún ambiente (dev/uat/main)."
+              exit 1
+              ;;
+          esac
+          echo "Rama '$BRANCH' -> ambiente '$ENV'"
+          echo "env_name=$ENV" >> "$GITHUB_OUTPUT"
+
   validate:
     name: Format & validate
     runs-on: ubuntu-latest
@@ -60,13 +93,11 @@ jobs:
           soft_fail: false
 
   plan:
-    name: Plan (${{ matrix.env }})
-    needs: [validate, tfsec]
+    name: Plan
+    needs: [resolve, validate, tfsec]
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        env: [dev, uat, prod]
+    env:
+      TARGET_ENV: ${{ needs.resolve.outputs.env_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -80,24 +111,31 @@ jobs:
 
       - name: Seleccionar/crear workspace
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform workspace select ${{ matrix.env }} || terraform workspace new ${{ matrix.env }}
+        run: terraform workspace select "$TARGET_ENV" || terraform workspace new "$TARGET_ENV"
 
       - name: terraform plan
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          terraform plan -no-color -var-file="envs/${{ matrix.env }}.tfvars" -out=tfplan | tee plan_output.txt
+          terraform plan -no-color -var-file="envs/$TARGET_ENV.tfvars" -out=tfplan | tee plan_output.txt
           terraform show -no-color tfplan >> plan_output.txt
 
       - name: Upload plan artifact
+        # Incluye también el .zip que genera data.archive_file (modules/lambda/.build/):
+        # es un efecto local en disco durante el plan, no viaja dentro de tfplan, y el
+        # job de apply corre en un runner nuevo que no lo tiene — hay que llevarlo a mano.
         uses: actions/upload-artifact@v4
         with:
-          name: tfplan-${{ matrix.env }}
-          path: ${{ env.TF_WORKING_DIR }}/tfplan
+          name: tfplan
+          path: |
+            ${{ env.TF_WORKING_DIR }}/tfplan
+            modules/lambda/.build/
           retention-days: 5
 
       - name: Comment plan on PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
+        env:
+          TARGET_ENV: ${{ needs.resolve.outputs.env_name }}
         with:
           script: |
             const fs = require('fs');
@@ -107,7 +145,7 @@ jobs:
             if (body.length > maxLen) {
               body = body.slice(-maxLen);
             }
-            const comment = `### Terraform Plan — ${{ matrix.env }}\n<details><summary>Ver plan completo</summary>\n\n\`\`\`\n${body}\n\`\`\`\n</details>`;
+            const comment = `### Terraform Plan — ${process.env.TARGET_ENV}\n<details><summary>Ver plan completo</summary>\n\n\`\`\`\n${body}\n\`\`\`\n</details>`;
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -116,19 +154,17 @@ jobs:
             });
 
   apply:
-    name: Apply (${{ matrix.env }}) — requiere aprobación manual
-    needs: [plan]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: Apply — requiere aprobación manual
+    needs: [resolve, plan]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        env: [dev, uat, prod]
     environment:
-      name: ${{ matrix.env }}
+      name: ${{ needs.resolve.outputs.env_name }}
     concurrency:
-      group: terraform-apply-${{ matrix.env }}
+      group: terraform-apply-${{ needs.resolve.outputs.env_name }}
       cancel-in-progress: false
+    env:
+      TARGET_ENV: ${{ needs.resolve.outputs.env_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -142,13 +178,13 @@ jobs:
 
       - name: Seleccionar/crear workspace
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform workspace select ${{ matrix.env }} || terraform workspace new ${{ matrix.env }}
+        run: terraform workspace select "$TARGET_ENV" || terraform workspace new "$TARGET_ENV"
 
       - name: Download plan artifact
         uses: actions/download-artifact@v4
         with:
-          name: tfplan-${{ matrix.env }}
-          path: ${{ env.TF_WORKING_DIR }}
+          name: tfplan
+          path: .
 
       - name: terraform apply
         working-directory: ${{ env.TF_WORKING_DIR }}
