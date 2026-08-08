@@ -120,10 +120,15 @@ jobs:
           terraform show -no-color tfplan >> plan_output.txt
 
       - name: Upload plan artifact
+        # Incluye también el .zip que genera data.archive_file (modules/lambda/.build/):
+        # es un efecto local en disco durante el plan, no viaja dentro de tfplan, y el
+        # job de apply corre en un runner nuevo que no lo tiene — hay que llevarlo a mano.
         uses: actions/upload-artifact@v4
         with:
           name: tfplan
-          path: ${{ env.TF_WORKING_DIR }}/tfplan
+          path: |
+            ${{ env.TF_WORKING_DIR }}/tfplan
+            modules/lambda/.build/
           retention-days: 5
 
       - name: Comment plan on PR
@@ -179,7 +184,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: tfplan
-          path: ${{ env.TF_WORKING_DIR }}
+          path: .
 
       - name: terraform apply
         working-directory: ${{ env.TF_WORKING_DIR }}
