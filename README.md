@@ -4,7 +4,7 @@ Práctica de aprovisionamiento de infraestructura en AWS con Terraform.
 
 ```text
 Terraform/
-├── .github/workflows/ # Pipeline: fmt/validate + SAST (tfsec) + plan + apply (con aprobación manual) x ambiente
+├── .github/workflows/ # Pipeline: fmt/validate + SAST (tfsec) + plan + apply (aprobación manual), por rama = ambiente
 ├── modules/            # Módulos reutilizables (sin provider ni state propio)
 │   ├── s3/              # Bucket S3 + objeto opcional
 │   └── lambda/           # Función Lambda (IAM role + empaquetado zip)
@@ -120,20 +120,32 @@ Pide confirmar con `yes`. Elimina bucket, objeto, Lambda, rol IAM y la notificac
 
 ## CI/CD (`.github/workflows/terraform-infra.yml`)
 
-Pipeline en GitHub Actions, dispara en PR y en push a `main` sobre cambios en `infra/` o `modules/`:
+El ambiente a desplegar **depende de la rama destino**, no de un ambiente elegido a mano — modelo de promoción por rama:
 
-1. **`validate`** — `terraform fmt -check`, `init`, `validate` (una vez, no depende del ambiente).
-2. **`tfsec`** — escaneo SAST de IaC (aquasecurity/tfsec). Corta el pipeline si encuentra hallazgos.
-3. **`plan`** — corre **una vez por ambiente** (`dev`, `uat`, `prod`, en paralelo, vía matrix): selecciona el workspace correspondiente, hace `terraform plan -var-file=envs/<ambiente>.tfvars`, guarda el plan como artefacto (`tfplan-<ambiente>`) y, si es un PR, comenta cada plan por separado para revisión humana antes de mergear.
-4. **`apply`** — **solo en push a `main`**, también una vez por ambiente. Cada uno corre bajo su propio GitHub Environment (`dev`, `uat`, `prod`) — **los tres piden aprobación manual independiente**, no solo producción. Al aprobar uno, aplica exactamente el plan generado en el paso 3 para ese ambiente (no vuelve a planear).
+```text
+feature/x ──PR──▶ dev ──PR──▶ uat ──PR──▶ main
+                (dev)       (uat)      (prod)
+```
+
+Cada PR o push a `dev`, `uat` o `main` dispara el pipeline; un job `resolve` traduce la rama destino a un ambiente (`dev`→`dev`, `uat`→`uat`, `main`→`prod`) y el resto del pipeline opera sobre ese único ambiente:
+
+1. **`resolve`** — determina el ambiente a partir de la rama (`github.base_ref` en PR, `github.ref_name` en push).
+2. **`validate`** — `terraform fmt -check`, `init`, `validate`.
+3. **`tfsec`** — escaneo SAST de IaC (aquasecurity/tfsec). Corta el pipeline si encuentra hallazgos.
+4. **`plan`** — selecciona el workspace del ambiente resuelto, corre `terraform plan -var-file=envs/<ambiente>.tfvars`, guarda el plan como artefacto y, si es un PR, lo comenta para revisión humana antes de mergear.
+5. **`apply`** — **solo en push** (o sea, tras mergear el PR), bajo el GitHub Environment que corresponda al ambiente resuelto. Pide aprobación manual ahí antes de aplicar exactamente el plan del paso 4.
+
+Para promover un cambio a producción, se repite el PR dos veces más: de `dev` a `uat`, y de `uat` a `main` — cada salto vuelve a planear y a pedir aprobación para ese ambiente específico.
 
 ### Setup manual en GitHub (una sola vez, no lo puedo hacer yo)
 
-Requiere el repo ya creado y con push hecho a GitHub:
+Requiere el repo ya creado (y **público** — ver nota abajo) y con push hecho a GitHub:
 
 1. **Secrets** (`Settings → Secrets and variables → Actions`): agregar `AWS_ACCESS_KEY_ID` y `AWS_SECRET_ACCESS_KEY` de un usuario/rol de AWS con permisos sobre S3, Lambda, IAM (rol de ejecución) y CloudWatch Logs — idealmente un IAM user dedicado al pipeline, no tu perfil personal `mae`. Los tres ambientes comparten las mismas credenciales por ahora (misma cuenta AWS) — ver "Próximos pasos" para separarlas.
-2. **Tres Environments de aprobación** (`Settings → Environments → New environment`, uno por cada nombre: `dev`, `uat`, `prod`): en cada uno, activar **Required reviewers** y agregar quién debe aprobar. Sin esto, el `apply` de ese ambiente corre sin pedir aprobación.
-3. Hacer `git init`, crear el repo en GitHub, y `git push` — el pipeline empieza a correr automáticamente en el primer PR/push.
+2. **Tres ramas**: `dev` y `uat` no existen por defecto — crearlas desde `main` (`git checkout -b dev && git push -u origin dev`, ídem `uat`).
+3. **Tres Environments de aprobación** (`Settings → Environments → New environment`, uno por cada nombre: `dev`, `uat`, `prod`): en cada uno, activar **Required reviewers** y agregar quién debe aprobar. Sin esto, el `apply` de ese ambiente corre sin pedir aprobación.
+   > "Required reviewers" en repos **privados** solo está disponible con plan GitHub Team/Enterprise — en Free hace falta que el repo sea **público** (Settings → Danger Zone → Change visibility) para que aparezca esa opción.
+4. (Opcional, recomendado) **Branch protection** (`Settings → Branches → Add rule`) sobre `dev`, `uat` y `main`: requerir pull request antes de mergear, para que nadie pueda pushear directo saltándose la revisión del `plan`.
 
 ## Visualización (opcional)
 
