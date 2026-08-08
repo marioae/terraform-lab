@@ -1,3 +1,4 @@
+
 output "bucket_name" {
   description = "Nombre del bucket que dispara la Lambda"
   value       = module.bucket.bucket_name
