@@ -1,0 +1,20 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Variables con valores sensibles o locales (usar *.tfvars.example como plantilla)
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+# Excepción: los .tfvars por ambiente sí se versionan (no tienen secretos, son config)
+!infra/envs/*.tfvars
+
+# Artefactos de build (zips generados por el módulo lambda)
+**/.build/

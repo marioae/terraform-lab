@@ -1,0 +1,4 @@
+aws_region    = "us-east-1"
+environment   = "uat"
+bucket_name   = "litethinking-s3-lambda-uat"
+function_name = "litethinking-s3-notifier-uat"
