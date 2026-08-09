@@ -31,6 +31,16 @@ Terraform/
 
   Debe devolver el `Account` e `Arn` de la cuenta, sin error.
 
+- **VPC default** en la región de trabajo (`us-east-1`) — el demo ECS Fargate la usa vía `data "aws_vpc" "default"`, no crea una propia. Verificar que exista:
+
+  ```powershell
+  aws ec2 describe-vpcs --filters Name=is-default,Values=true --region us-east-1 --profile mae
+  ```
+
+  Si no devuelve ninguna VPC, hay que crear una antes del `apply` (o avisar para adaptar `infra/main.tf` a una VPC propia).
+
+- **Docker Desktop** corriendo — solo necesario para el paso de build/push de imagen del demo ECS (sección 4).
+
 ## 2. Backend remoto (setup inicial, una sola vez)
 
 `infra/` guarda su state en un bucket S3 (`infra/backend.tf`) en vez de en disco — así el pipeline de CI, que corre en runners efímeros, puede leer/escribir siempre el mismo state. Ese bucket **no lo gestiona Terraform**: se crea a mano, para evitar el problema de huevo-y-gallina (Terraform necesitaría un backend para guardar el state del backend que está creando) y para que un `destroy` futuro nunca pueda llevarse por delante el propio bucket de state.
@@ -91,17 +101,25 @@ aws logs tail /aws/lambda/<function_name> --profile mae --follow
 
 **Desplegar una imagen en el servicio ECS Fargate del demo:**
 
-El `apply` crea el repo ECR, el cluster, el ALB y el servicio, pero el servicio no queda "sano" hasta que exista una imagen en el tag que espera (`ecs_image_tag`, `latest` por default) — Terraform no construye ni sube imágenes Docker, eso es un paso manual aparte:
+El `apply` crea el repo ECR, el cluster, el ALB y el servicio, pero el servicio no queda "sano" hasta que exista una imagen en el tag que espera (`ecs_image_tag`, `latest` por default) — Terraform no construye ni sube imágenes Docker, eso es un paso manual aparte.
 
-```powershell
-$repo = terraform output -raw ecs_ecr_repository_url
-aws ecr get-login-password --region us-east-1 --profile mae | docker login --username AWS --password-stdin $repo.Split('/')[0]
+> **Ejecutar este bloque en Git Bash, no en PowerShell.** `docker login --password-stdin` recibiendo el token por pipe (`aws ecr get-login-password | docker login ...`) falla en Windows PowerShell 5.1 con `Error response from daemon: ... failed with status: 400 Bad Request` — es un problema conocido de cómo PowerShell reencodea la salida al pipear entre dos ejecutables nativos, no de permisos ni de Docker. En Git Bash el mismo comando funciona sin cambios.
+
+```bash
+repo=$(terraform output -raw ecs_ecr_repository_url)
+aws ecr get-login-password --region us-east-1 --profile mae | docker login --username AWS --password-stdin "${repo%%/*}"
 docker pull nginx:latest
 docker tag nginx:latest "${repo}:latest"
 docker push "${repo}:latest"
 ```
 
-El servicio recoge la imagen nueva en el próximo ciclo de despliegue de tareas (o forzarlo con `aws ecs update-service --cluster <ecs_app_name> --service <ecs_app_name> --force-new-deployment --profile mae`). Verificar en el navegador con la URL de `terraform output ecs_alb_dns_name`.
+El servicio recoge la imagen nueva en el próximo ciclo de despliegue de tareas (1-2 min), o se puede forzar con `aws ecs update-service --cluster <ecs_app_name> --service <ecs_app_name> --force-new-deployment --profile mae`. Verificar que arrancó la tarea:
+
+```bash
+aws ecs describe-services --cluster <ecs_app_name> --services <ecs_app_name> --profile mae --region us-east-1 --query "services[0].deployments"
+```
+
+Y probar en el navegador con `http://` (el listener del ALB es HTTP plano, sin TLS) usando la URL de `terraform output ecs_alb_dns_name`.
 
 ## 5. Cómo destruirlo
 
@@ -168,12 +186,24 @@ Requiere el repo ya creado (y **público** — ver nota abajo) y con push hecho 
 
 Requiere **InfraMap** ([releases](https://github.com/cycloidio/inframap/releases)) y **Graphviz** (`dot -V` para verificar), ambos instalados manualmente y agregados al `PATH`.
 
-```powershell
+El state real vive en el bucket S3 remoto, no en un archivo local — hay que traer una copia del workspace activo primero. Ejecutar desde **Git Bash** (el `>` de PowerShell puede escribir el archivo en UTF-16 en vez de UTF-8, y el parser de InfraMap solo acepta UTF-8):
+
+```bash
 cd infra
-inframap generate --raw terraform.tfstate | dot -Tpng -o diagrama-raw.png
+terraform state pull > estado.tfstate   # queda cubierto por .gitignore (*.tfstate), no hace falta borrarlo a mano
 ```
 
-**Importante:** usar siempre `--raw`. El modo por defecto de InfraMap filtra recursos que no reconoce como "arquitectura de red" (VPCs, EC2, etc.).
+**Diagrama general (componentes principales — recomendado para una vista rápida):**
+```bash
+inframap generate --tfstate estado.tfstate | dot -Tpng -o diagrama-general.png
+```
+
+**Diagrama detallado (todos los recursos, incluye IAM/security groups/ECR):**
+```bash
+inframap generate --tfstate --raw estado.tfstate | dot -Tpng -o diagrama-detallado.png
+```
+
+Sin `--raw`, InfraMap filtra recursos que no reconoce como "arquitectura de red" (roles IAM, attachments, etc.) y muestra íconos de AWS por servicio — da una vista más limpia. Con `--raw` no filtra nada, útil para depurar pero más ruidoso. El flag `--tfstate` fuerza el parser correcto (si el archivo no termina en `.tfstate`, InfraMap puede confundirlo con código HCL y tirar errores de encoding que no tienen que ver con el contenido real).
 
 ## Próximos pasos
 
