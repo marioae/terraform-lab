@@ -18,3 +18,14 @@ variable "function_name" {
   description = "Nombre de la función Lambda — obligatorio, viene del .tfvars del ambiente (ver envs/)"
   type        = string
 }
+
+variable "ecs_app_name" {
+  description = "Nombre base para cluster/servicio/ALB/repo ECR del demo ECS Fargate — obligatorio, viene del .tfvars del ambiente (ver envs/)"
+  type        = string
+}
+
+variable "ecs_image_tag" {
+  description = "Tag de la imagen en ECR que el servicio ECS despliega (debe existir en el repo antes de que las tareas arranquen sanas)"
+  type        = string
+  default     = "latest"
+}

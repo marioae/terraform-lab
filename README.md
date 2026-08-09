@@ -7,8 +7,9 @@ Terraform/
 ├── .github/workflows/ # Pipeline: fmt/validate + SAST (tfsec) + plan + apply (aprobación manual), por rama = ambiente
 ├── modules/            # Módulos reutilizables (sin provider ni state propio)
 │   ├── s3/              # Bucket S3 + objeto opcional
-│   └── lambda/           # Función Lambda (IAM role + empaquetado zip)
-└── infra/                # Único root module desplegable (hoy: bucket + Lambda; aquí se suman futuros componentes)
+│   ├── lambda/           # Función Lambda (IAM role + empaquetado zip)
+│   └── ecs/               # Demo ECS Fargate (repo ECR, cluster, task def, ALB, service)
+└── infra/                # Único root module desplegable (bucket + Lambda + demo ECS Fargate)
     └── envs/               # dev.tfvars / uat.tfvars / prod.tfvars — un mismo código, tres ambientes
 ```
 
@@ -88,6 +89,20 @@ aws s3 cp algo.txt s3://<bucket_name>/algo.txt --profile mae
 aws logs tail /aws/lambda/<function_name> --profile mae --follow
 ```
 
+**Desplegar una imagen en el servicio ECS Fargate del demo:**
+
+El `apply` crea el repo ECR, el cluster, el ALB y el servicio, pero el servicio no queda "sano" hasta que exista una imagen en el tag que espera (`ecs_image_tag`, `latest` por default) — Terraform no construye ni sube imágenes Docker, eso es un paso manual aparte:
+
+```powershell
+$repo = terraform output -raw ecs_ecr_repository_url
+aws ecr get-login-password --region us-east-1 --profile mae | docker login --username AWS --password-stdin $repo.Split('/')[0]
+docker pull nginx:latest
+docker tag nginx:latest "${repo}:latest"
+docker push "${repo}:latest"
+```
+
+El servicio recoge la imagen nueva en el próximo ciclo de despliegue de tareas (o forzarlo con `aws ecs update-service --cluster <ecs_app_name> --service <ecs_app_name> --force-new-deployment --profile mae`). Verificar en el navegador con la URL de `terraform output ecs_alb_dns_name`.
+
 ## 5. Cómo destruirlo
 
 ```powershell
@@ -95,7 +110,9 @@ terraform workspace select <ambiente>   # dev, uat o prod — confirmá con "ter
 terraform destroy -var-file="envs/<ambiente>.tfvars"
 ```
 
-Pide confirmar con `yes`. Elimina bucket, objeto, Lambda, rol IAM y la notificación **de ese ambiente**; los otros dos quedan intactos. (El bucket de state, al no estar gestionado por Terraform, no se ve afectado.)
+Pide confirmar con `yes`. Elimina bucket, objeto, Lambda, rol IAM, la notificación y todo el demo ECS (repo ECR, cluster, ALB, servicio) **de ese ambiente**; los otros dos quedan intactos. (El bucket de state, al no estar gestionado por Terraform, no se ve afectado.)
+
+> El ALB tiene costo fijo por hora mientras exista — si el demo ECS es solo para práctica puntual, conviene destruirlo cuando no se esté usando en vez de dejarlo corriendo entre sesiones.
 
 ## Archivos de `infra/`
 
@@ -104,9 +121,9 @@ Pide confirmar con `yes`. Elimina bucket, objeto, Lambda, rol IAM y la notificac
 | `versions.tf` | Versión mínima de Terraform y providers requeridos (`aws`, `random`, `archive`) |
 | `provider.tf` | Región de AWS (credenciales vía `$env:AWS_PROFILE` local o secrets en CI) |
 | `backend.tf` | Backend remoto `s3` para el state — ver [Backend remoto](#2-backend-remoto-setup-inicial-una-sola-vez) |
-| `variables.tf` | Parámetros sin default (`aws_region` sí trae uno): `bucket_name`, `environment`, `function_name` — obligan a pasar un `-var-file` |
+| `variables.tf` | Parámetros sin default (`aws_region` sí trae uno): `bucket_name`, `environment`, `function_name`, `ecs_app_name` — obligan a pasar un `-var-file` (`ecs_image_tag` sí trae default: `latest`) |
 | `envs/dev.tfvars`, `envs/uat.tfvars`, `envs/prod.tfvars` | Valores concretos por ambiente — ver [Ambientes](#3-ambientes-dev--uat--prod) |
-| `main.tf` | `module "bucket"`, `module "notifier"`, permiso de invocación y notificación S3→Lambda |
+| `main.tf` | `module "bucket"`, `module "notifier"`, permiso de invocación y notificación S3→Lambda, `module "ecs_app"` (demo Fargate) sobre la VPC default de la cuenta |
 | `outputs.tf` | Valores mostrados tras el `apply` |
 | `index.html` | Objeto de prueba subido al bucket |
 | `src/index.js` | Código fuente de la Lambda (se empaqueta a zip automáticamente) |
@@ -163,4 +180,4 @@ inframap generate --raw terraform.tfstate | dot -Tpng -o diagrama-raw.png
 - DynamoDB para locking del state, si en algún momento hay applies concurrentes reales (más de un desarrollador, o pipelines paralelos).
 - Reemplazar las credenciales estáticas del pipeline (`AWS_ACCESS_KEY_ID`/`SECRET`) por OIDC (GitHub → rol IAM asumido temporalmente, sin secreto de larga duración) — más seguro, algo más de setup inicial.
 - Separar `prod` (y quizás `uat`) en su propia cuenta de AWS, con su propio set de credenciales en el pipeline — hoy los tres ambientes comparten cuenta, lo cual es razonable para practicar pero no es el aislamiento real que tendría una prod de verdad.
-- Crear `modules/ecs` y sumarlo a `infra/main.tf` para practicar ECS (cluster, task definition, service, IAM, networking).
+- El demo ECS usa la VPC default y HTTP plano en el ALB (sin HTTPS/ACM) — suficiente para practicar, pero `tfsec` puede marcar hallazgos (SG `0.0.0.0/0`, listener sin TLS, ECR con tags mutables) que en un caso real habría que resolver antes de producción.

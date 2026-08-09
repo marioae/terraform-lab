@@ -6,6 +6,20 @@ locals {
   }
 }
 
+# VPC default de la cuenta/región — el ALB y las tareas Fargate se despliegan ahí.
+# Si la cuenta no tiene VPC default (se pudo haber borrado), este data source falla:
+# hay que crear una VPC propia o restaurar la default antes del apply.
+data "aws_vpc" "default" {
+  default = true
+}
+
+data "aws_subnets" "default" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+}
+
 module "bucket" {
   source = "../modules/s3"
 
@@ -49,4 +63,15 @@ resource "aws_s3_bucket_notification" "this" {
   }
 
   depends_on = [aws_lambda_permission.allow_s3]
+}
+
+module "ecs_app" {
+  source = "../modules/ecs"
+
+  app_name    = var.ecs_app_name
+  environment = var.environment
+  vpc_id      = data.aws_vpc.default.id
+  subnet_ids  = data.aws_subnets.default.ids
+  image_tag   = var.ecs_image_tag
+  tags        = local.common_tags
 }
